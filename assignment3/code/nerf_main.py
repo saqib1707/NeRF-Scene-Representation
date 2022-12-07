@@ -107,13 +107,15 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    parser.add_argument("--i_embed", type=int, default=0, 
-                        help='set 0 for default positional encoding, -1 for none')
-
+    
+    # positional encoding
     parser.add_argument("--num_freqs_xyz", type=int, default=10, 
                         help='log2 of max freq for positional encoding (3D location)')
     parser.add_argument("--num_freqs_viewdir", type=int, default=4, 
                         help='log2 of max freq for positional encoding (2D direction)')
+    parser.add_argument("--i_embed", type=int, default=0, 
+                        help='set 0 for default positional encoding, -1 for none')
+
     parser.add_argument("--raw_noise_std", type=float, default=0., 
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
 
@@ -249,10 +251,10 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         print("Using ray batching --> Obtaining rays !!!")
         rays = np.stack([get_rays_np(img_height, img_width, cam_int_mat, p) for p in train_poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print("Rays obtained --> Concatenate", rays.shape)
-        rays_rgb = np.concatenate([rays, train_images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+        rays_rgb = np.concatenate([rays, train_images[:,None]], 1)     # [N, ro+rd+rgb, H, W, 3]
+        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4])      # [N, H, W, ro+rd+rgb, 3]
 #         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
-        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3])     # [N*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         np.random.shuffle(rays_rgb)
@@ -277,7 +279,7 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         # Sample random ray batch
         if use_batching:
             # Random over all images
-            batch = rays_rgb[i_batch:i_batch + args.ray_batch_size] # [B, 2+1, 3*?]
+            batch = rays_rgb[i_batch:i_batch + args.ray_batch_size] # [ray_batch_size, 2+1, 3]
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
 
@@ -336,6 +338,7 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
             
         loss.backward()
         optimizer.step()
+        global_step += 1
 
         ###   NOTE: IMPORTANT! update learning rate   ###
 #         decay_steps = args.lrate_decay_steps * 1000
@@ -345,8 +348,6 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         
         dt = round(time.time() - start_time, 4)
         #####           end            #####
-        
-        global_step += 1
 
         # ...log the running loss
         writer.add_scalar('training loss', loss.item(), global_step)
@@ -413,7 +414,7 @@ if __name__ == "__main__":
                               "--i_print=10000", 
                               "--i_testset=50000", 
                               "--resize_factor=4", 
-                              "--num_train_itr=150001"])
+                              "--num_train_itr=200001"])
     
     print("Loading dataset...")
     train_data_dict, val_data_dict, test_data_dict, cam_int_mat, bbox_mat = dataset.load_data_from_files(store_data=False,
