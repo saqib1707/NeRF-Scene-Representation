@@ -44,24 +44,18 @@ else:
     print("Device:", device)
 
 
-def config_parser():
+def config_parser(base_dir=os.path.join(os.getcwd(), "../")):
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None, 
                         help='config file path')
     parser.add_argument("--expname", type=str, 
                         help='experiment name')
-#     parser.add_argument("--basedir", type=str, default=os.path.join(os.getcwd(), "drive/MyDrive/CSE291/assignments/assignment3/"), 
-#                         help='project base directory')
-#     parser.add_argument("--logdir", type=str, default=os.path.join(os.getcwd(), "drive/MyDrive/CSE291/assignments/assignment3/logdir/"), 
-#                         help='where to store ckpts and logs')
-#     parser.add_argument("--datadir", type=str, default=os.path.join(os.getcwd(), "drive/MyDrive/CSE291/assignments/assignment3/data/bottles"), 
-#                         help='input data directory')
 
-    parser.add_argument("--basedir", type=str, default=os.path.join(os.getcwd(), "../"), 
+    parser.add_argument("--base_dir", type=str, default=base_dir, 
                         help='project base directory')
-    parser.add_argument("--logdir", type=str, default=os.path.join(os.getcwd(), "../logdir/"), 
+    parser.add_argument("--log_dir", type=str, default=os.path.join(base_dir, "logdir/"), 
                         help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default=os.path.join(os.getcwd(), "../data/bottles"), 
+    parser.add_argument("--data_dir", type=str, default=os.path.join(base_dir, "data/bottles"), 
                         help='input data directory')
 
     # network architecture options
@@ -77,9 +71,9 @@ def config_parser():
     # ray batch options
     parser.add_argument("--ray_batch_size", type=int, default=32*32, 
                         help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--chunk", type=int, default=1024, 
+    parser.add_argument("--chunk", type=int, default=32*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024, 
+    parser.add_argument("--netchunk", type=int, default=32*32, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -162,7 +156,7 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=100, 
+    parser.add_argument("--i_print",   type=int, default=1000, 
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
@@ -176,29 +170,35 @@ def config_parser():
     return parser
 
 
-def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
-    train_images = train_data_dict['images']
-    train_poses = train_data_dict['poses']
-#     test_poses = train_data_dict['poses'][0:5]
-    test_poses = test_data_dict['poses']
-    test_reqd_poses = np.array([test_poses[0], test_poses[16], test_poses[55], test_poses[93], test_poses[160]])
+
+def train(train_data_dict, val_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1, args=None):
+    train_images = train_data_dict['images']    # [N, H, W, 3]
+    train_poses = train_data_dict['poses']      # [N, 4, 4]
     
-    print("Loaded dataset:", train_images.shape, train_poses.shape, test_poses.shape)
+    val_images = val_data_dict['images']
+    val_poses = val_data_dict['poses']
+
+    test_poses = test_data_dict['poses']        # [num_test_poses, 4, 4]
+    test_poses = np.array([test_poses[0], test_poses[16], test_poses[55], test_poses[93], test_poses[160]])
+    
+#     print("Loaded dataset:", train_images.shape, train_poses.shape, test_poses.shape)
     
     print('DEFINING BOUNDS')
     near = 0.
     far = 5.0
     
     if args.white_bkgd:
-        train_images = train_images[...,:3]*train_images[...,-1:] + (1.0 - train_images[...,-1:])
+        train_images = train_images[...,:3] * train_images[...,-1:] + (1.0 - train_images[...,-1:])
+        val_images = val_images[...,:3] * val_images[...,-1:] + (1.0 - val_images[...,-1:])
     else:
         train_images = train_images[...,:3]
+        val_images = val_images[...,:3]
 
     img_height, img_width, focal = train_images[0].shape[0], train_images[1].shape[1], cam_int_mat[0,0]
     
     # create the log directory and store the hyperparameters in config file
-    os.makedirs(os.path.join(args.logdir, args.expname), exist_ok=True)
-    args_file = os.path.join(args.logdir, args.expname, "args.txt")
+    os.makedirs(os.path.join(args.log_dir, args.expname), exist_ok=True)
+    args_file = os.path.join(args.log_dir, args.expname, "args.txt")
     
     with open(args_file, 'w') as file:
         for arg in sorted(vars(args)):
@@ -206,7 +206,7 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
             file.write('{} = {}\n'.format(arg, attr))
             
     if args.config is not None:
-        config_file = os.path.join(args.logdir, args.expname, 'config.txt')
+        config_file = os.path.join(args.log_dir, args.expname, 'config.txt')
         with open(config_file, 'w') as file:
             file.write(open(args.config, 'r').read())
 
@@ -216,8 +216,11 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
     render_kwargs_test.update({'near' : near, 'far' : far,})
     
     global_step = start_itr
+    
     # move test data poses to GPU
     test_poses = torch.tensor(test_poses).to(device)
+    val_poses = torch.tensor(val_poses).to(device)
+#     val_images = torch.tensor(val_images).to(device)
     
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -230,12 +233,17 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
                 # Default is smoother render_poses path
                 test_images = None
 
-            testsavedir = os.path.join(args.logdir, args.expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 
-                                                                                                'path', start_itr))
+            testsavedir = os.path.join(args.log_dir, args.expname, 'testset_{:06d}'.format(start_itr))
             os.makedirs(testsavedir, exist_ok=True)
             print("Test poses shape:", test_poses.shape)
 
-            rgbs, _ = render_path(test_poses, img_height, img_width, focal, K, args.chunk, render_kwargs_test, 
+            test_img_height = img_height * args.resize_factor
+            test_img_width = img_width * args.resize_factor
+            test_focal = focal * args.resize_factor
+            test_cam_int_mat = np.copy(cam_int_mat)
+            test_cam_int_mat[0:2] = cam_int_mat[0:2] * args.resize_factor
+
+            rgbs, _ = render_path(test_poses, test_img_height, test_img_width, test_focal, test_cam_int_mat, args.chunk, render_kwargs_test, 
                                   gt_imgs=test_images, savedir=testsavedir, render_factor=args.render_factor)
             
             print("Rendering Complete !!!", testsavedir)
@@ -249,12 +257,14 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
     if use_batching:
         # for random ray batching
         print("Using ray batching --> Obtaining rays !!!")
-        rays = np.stack([get_rays_np(img_height, img_width, cam_int_mat, p) for p in train_poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+        rays = np.stack([get_rays_np(img_height, img_width, cam_int_mat, p) for p in train_poses[:,:3,:4]], 0) # [N, ro+rd=2, H, W, 3]
         print("Rays obtained --> Concatenate", rays.shape)
-        rays_rgb = np.concatenate([rays, train_images[:,None]], 1)     # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4])      # [N, H, W, ro+rd+rgb, 3]
+#         print(train_images[:,None].shape)     # [N, 1, H, W, 3]
+        
+        rays_rgb = np.concatenate([rays, train_images[:,None]], 1)     # [N, ro+rd+rgb=3, H, W, 3]
+        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4])      # [N, H, W, ro+rd+rgb=3, 3]
 #         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
-        rays_rgb = np.reshape(rays_rgb, [-1,3,3])     # [N*H*W, ro+rd+rgb, 3]
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3])     # [N*H*W, ro+rd+rgb=3, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         np.random.shuffle(rays_rgb)
@@ -262,8 +272,8 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         i_batch = 0
         
         # Move training data to GPU
-        train_images = torch.tensor(train_images).to(device)
-        rays_rgb = torch.tensor(rays_rgb).to(device)
+        train_images = torch.tensor(train_images).to(device)   # [N, H, W, 3]
+        rays_rgb = torch.tensor(rays_rgb).to(device)           # [N*H*W, ro+rd+rgb=3, 3]
     
     train_poses = torch.tensor(train_poses).to(device)
     
@@ -271,7 +281,7 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
     print("Start Training !!!")
     
     # default `log_dir` is "runs"
-    writer = SummaryWriter(os.path.join(args.logdir, args.expname, 'runs/'))
+    writer = SummaryWriter(os.path.join(args.log_dir, args.expname, 'runs/'))
     
     for i in tqdm(range(start_itr, num_itr)):
         start_time = time.time()
@@ -279,9 +289,9 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         # Sample random ray batch
         if use_batching:
             # Random over all images
-            batch = rays_rgb[i_batch:i_batch + args.ray_batch_size] # [ray_batch_size, 2+1, 3]
-            batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s = batch[:2], batch[2]
+            batch = rays_rgb[i_batch:i_batch + args.ray_batch_size] # [ray_batch_size, ro+rd+rgb=3, 3]
+            batch = torch.transpose(batch, 0, 1)            # [ro+rd+rgb=3, ray_batch_size, 3]
+            batch_rays, target_s = batch[:2], batch[2]      # [ro+rd=2, ray_batch_size, 3], [rgb=1, ray_batch_size, 3]
 
             i_batch += args.ray_batch_size
             if i_batch >= rays_rgb.shape[0]:
@@ -341,21 +351,21 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
         global_step += 1
 
         ###   NOTE: IMPORTANT! update learning rate   ###
-#         decay_steps = args.lrate_decay_steps * 1000
-#         new_lrate = args.lrate * (args.decay_rate ** (global_step / decay_steps))
-#         for param_group in optimizer.param_groups:
-#             param_group['lr'] = new_lrate
+        decay_steps = args.lrate_decay_steps * 1000
+        new_lrate = args.lrate * (args.decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
         
         dt = round(time.time() - start_time, 4)
         #####           end            #####
 
         # ...log the running loss
         writer.add_scalar('training loss', loss.item(), global_step)
-        writer.add_scalar('psnr', psnr.item(), global_step)
+        writer.add_scalar('train psnr', psnr.item(), global_step)
             
         # Rest is logging
         if i % args.i_weights == 0:
-            path = os.path.join(args.logdir, args.expname, '{:06d}.tar'.format(i))
+            path = os.path.join(args.log_dir, args.expname, '{:06d}.tar'.format(i))
             
             if args.num_fine_samples_per_ray > 0:
                 torch.save({
@@ -373,31 +383,58 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
             
             print('Saved checkpoints at:', path)
         
+        
         if i % args.i_video == 0 and i > 0:
-            print("Synthesizing views for test poses...")
+            # evaluation on validation images
+            print("Synthesizing novel views for validation poses...")
             
-            testsavedir = os.path.join(args.logdir, args.expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('Test poses shape:', test_poses.shape)
-
-            # Turn on testing mode
+            valsavedir = os.path.join(args.log_dir, args.expname, 'valset_{:06d}'.format(i))
+            os.makedirs(valsavedir, exist_ok=True)
+            print('Val poses shape:', val_poses.shape)
+            
+            # Turn on Validation mode
             with torch.no_grad():
-                rgbs, disps = render_path(test_poses, img_height, img_width, focal, cam_int_mat, args.chunk, render_kwargs_test,
-                                         gt_imgs=None, savedir=testsavedir)
+                rgbs, disps = render_path(val_poses, img_height, img_width, focal, cam_int_mat, args.chunk, 
+                                          render_kwargs_test, gt_imgs=None, savedir=valsavedir)
             
-            print('Done, saving', rgbs.shape, disps.shape)
+            # compute validation PSNR
+            val_psnr = 0.
+            for val_idx in range(val_images.shape[0]):
+                val_psnr += -10. * np.log10(np.mean((rgbs[val_idx] - val_images[val_idx]) ** 2))
+#                 val_psnr += mse2psnr(img2mse(rgbs[val_idx], val_images[val_idx]))
             
-            moviebase = os.path.join(args.logdir, args.expname, '{}_spiral_{:06d}_'.format(args.expname, i))
+            val_psnr /= val_images.shape[0]
+            writer.add_scalar('Val psnr', val_psnr, global_step)
+            
+            print('Done saving synthesized images:', rgbs.shape, disps.shape, val_psnr)
+            
+            moviebase = os.path.join(args.log_dir, args.expname, '{}_valset_{:06d}_'.format(args.expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-
-        
-#         if i % args.i_testset == 0 and i > 0:
             
+
+#         if i % args.i_video == 0 and i > 0:
+#             print("Synthesizing views for test poses...")
+            
+#             testsavedir = os.path.join(args.log_dir, args.expname, 'testset_{:06d}'.format(i))
+#             os.makedirs(testsavedir, exist_ok=True)
+#             print('Test poses shape:', test_poses.shape)
+
+#             # Turn on testing mode
 #             with torch.no_grad():
-#                 render_path(test_poses.to(device), img_height, img_width, focal, cam_int_mat, args.chunk, render_kwargs_test, 
-#                             gt_imgs=None, savedir=testsavedir)
-#             print('Saved test set')
+#                 test_img_height = img_height * args.resize_factor
+#                 test_img_width = img_width * args.resize_factor
+#                 test_focal = focal * args.resize_factor
+#                 test_cam_int_mat = cam_int_mat * args.resize_factor
+                
+#                 rgbs, disps = render_path(test_poses, test_img_height, test_img_width, test_focal, test_cam_int_mat, args.chunk, 
+#                                           render_kwargs_test, gt_imgs=None, savedir=testsavedir)
+            
+#             print('Done saving synthesized images:', rgbs.shape, disps.shape)
+            
+#             moviebase = os.path.join(args.log_dir, args.expname, '{}_testset_{:06d}_'.format(args.expname, i))
+#             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+#             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
         
         
         if i % args.i_print==0:
@@ -407,14 +444,14 @@ def train(train_data_dict, test_data_dict, cam_int_mat, num_itr=100000+1):
     
 if __name__ == "__main__":
     parser = config_parser()
-    args = parser.parse_args(["--expname=exp005", 
+    args = parser.parse_args(["--expname=finalexp001", 
                               "--use_viewdirs", 
                               "--i_weights=10000", 
-                              "--i_video=50000", 
-                              "--i_print=10000", 
-                              "--i_testset=50000", 
+                              "--i_video=20000",
+                              "--i_print=1000", 
                               "--resize_factor=4", 
-                              "--num_train_itr=200001"])
+                              "--num_train_itr=100001", 
+                              "--no_ndc"])
     
     print("Loading dataset...")
     train_data_dict, val_data_dict, test_data_dict, cam_int_mat, bbox_mat = dataset.load_data_from_files(store_data=False,
@@ -426,5 +463,5 @@ if __name__ == "__main__":
     print("Test data:", test_data_dict['poses'].shape)
     print("Cam Intrinsic mat and bbox:", cam_int_mat.shape, bbox_mat.shape)
 
-    train(train_data_dict, test_data_dict, cam_int_mat, num_itr=args.num_train_itr)
+    train(train_data_dict, val_data_dict, test_data_dict, cam_int_mat, num_itr=args.num_train_itr, args=args)
     

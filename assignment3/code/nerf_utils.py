@@ -52,26 +52,18 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         embed_fn: positional encoding function for xyz coordinates
         embeddirs_fn: positional encoding function for direction (d1,d2,d3) coordinates
     """
-#     print("Hey bro:", inputs.shape, netchunk)
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])  # [num_rays * num_samples_per_ray, 3]
     embedded_xyz = embed_fn(inputs_flat)                         # [num_rays * num_samples_per_ray, 3 * num_freqs_xyz * 2 + 3]
-#     print("Hey dude:", inputs_flat.shape, embedded_xyz.shape)
 
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)   # [num_rays, num_samples_per_ray, 3]
-#         print("viewdirs shape:", input_dirs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])  # [num_rays * num_samples_per_ray, 3]
-#         print("viewdirs flat shape:", input_dirs_flat.shape)
         embedded_dirs = embeddirs_fn(input_dirs_flat)         # [num_rays * num_samples_per_ray, 3 * num_freqs_dirs * 2 + 3]
         embedded = torch.cat([embedded_xyz, embedded_dirs], dim=-1)  # [num_rays * num_samples_per_ray, (3 * num_freqs_xyz * 2 + 3) + (3 * num_freqs_dirs * 2 + 3)]
-#         print("embeddings shape:", embedded_dirs.shape, embedded.shape)
         outputs_flat = batchify(fn, netchunk)(embedded)
-#         outputs_flat = fn(embedded)
-#         print("stage-5:", outputs_flat.shape)
     else:
         outputs_flat = batchify(fn, netchunk)(embedded_xyz)
 
-#     outputs_flat = batchify(fn, netchunk)(embedded)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -79,47 +71,22 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """
     Render rays in smaller minibatches to avoid OOM (Out Of Memory error).
+    Arguments:
+        rays_flat: [ray_batch_size, 3+3+2+3 = 11 (ro+rd+near+far+normalized_viewdir)]
     """
     all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
+    
+    for i in range(0, rays_flat.shape[0], chunk):     # (start, stop, step)
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
-        for k in ret:
-            if k not in all_ret:
-                all_ret[k] = []
-            all_ret[k].append(ret[k])
+        
+        for key in ret:
+            if key not in all_ret:
+                all_ret[key] = []
+            all_ret[key].append(ret[key])
 
-    all_ret = {k : torch.cat(all_ret[k], dim=0) for k in all_ret}
+    all_ret = {key : torch.cat(all_ret[key], dim=0) for key in all_ret}
+    
     return all_ret
-
-
-class PositionalEncoderCopy(nn.Module):
-    """
-    Sine-cosine positional encoder for input points.
-    """
-    def __init__(self, d_input: int, n_freqs: int, log_space: bool = True):
-        super().__init__()
-        self.d_input = d_input
-        self.n_freqs = n_freqs
-        self.log_space = log_space
-        self.d_output = d_input * (1 + 2 * self.n_freqs)
-        self.embed_fns = [lambda x: x]
-
-        # Define frequencies in either linear or log scale
-        if self.log_space:
-            freq_bands = 2.**torch.linspace(0., self.n_freqs - 1, self.n_freqs)
-        else:
-            freq_bands = torch.linspace(2.**0., 2.**(self.n_freqs - 1), self.n_freqs)
-
-        # Alternate sin and cos
-        for freq in freq_bands:
-            self.embed_fns.append(lambda x, freq=freq: torch.sin(x * freq))
-            self.embed_fns.append(lambda x, freq=freq: torch.cos(x * freq))
-  
-    def forward(self, x) -> torch.Tensor:
-        """
-        Apply positional encoding to input.
-        """
-        return torch.cat([fn(x) for fn in self.embed_fns], dim=-1)
 
 
 class PositionalEncoder(nn.Module):
@@ -129,7 +96,7 @@ class PositionalEncoder(nn.Module):
         self.input_dim = input_dim
         self.log_space = log_space
         self.include_input = include_input
-        self.embed_fn = []
+        self.embed_fn = [lambda x: x]
         
         if self.include_input:
             self.out_dim = self.input_dim * (2 * self.num_freqs + 1)
@@ -139,21 +106,26 @@ class PositionalEncoder(nn.Module):
         if self.log_space:
             self.freq_bands = 2.0 ** torch.linspace(0, self.num_freqs - 1, self.num_freqs)
         else:
-            self.freq_bands = torch.linspace(1, 2**(self.num_freqs - 1), self.num_freqs)
+            self.freq_bands = torch.linspace(1.0, 2**(self.num_freqs - 1), self.num_freqs)
+            
+        # Alternate sin and cos
+        for freq in self.freq_bands:
+            self.embed_fn.append(lambda x, freq=freq: torch.sin(x * freq))
+            self.embed_fn.append(lambda x, freq=freq: torch.cos(x * freq))
     
     def forward(self, x):
         """
         apply positional encoding to input x
         """
-        self.embed_fn = []
-        if self.include_input:
-            self.embed_fn.append(x)
+#         self.embed_fn = []
+#         if self.include_input:
+#             self.embed_fn.append(x)
         
-        for freq in self.freq_bands:
-            self.embed_fn.append(torch.sin(x * freq))
-            self.embed_fn.append(torch.cos(x * freq))
+#         for freq in self.freq_bands:
+#             self.embed_fn.append(torch.sin(x * freq))
+#             self.embed_fn.append(torch.cos(x * freq))
         
-        return torch.cat(self.embed_fn, dim=-1)
+        return torch.cat([fn(x) for fn in self.embed_fn], dim=-1)
 
 
 class NeRF(nn.Module):
@@ -288,7 +260,7 @@ def create_NeRF(args):
                                                                          netchunk=args.netchunk)
 
     # create optimizer
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
     start_itr = 0
     
     # load checkpoints (if stored)
@@ -296,9 +268,9 @@ def create_NeRF(args):
         ckpts_file_lst = [args.ckpt_coarsenet_path]
     else:
         ckpts_file_lst = []
-        for file in sorted(os.listdir(os.path.join(args.logdir, args.expname))):
+        for file in sorted(os.listdir(os.path.join(args.log_dir, args.expname))):
             if 'tar' in file:
-                ckpts_file_lst.append(os.path.join(args.logdir, args.expname, file))
+                ckpts_file_lst.append(os.path.join(args.log_dir, args.expname, file))
 
     print("Found checkpoint files:", ckpts_file_lst)
     if len(ckpts_file_lst) > 0 and args.no_reload_ckpt == False:
@@ -366,6 +338,7 @@ def get_rays_np(H, W, K, c2w):
 
 
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
+    print("WHAT THE FUCK !!!")
     # Shift ray origins to near plane
     t = -(near + rays_o[...,2]) / rays_d[...,2]
     rays_o = rays_o + t[...,None] * rays_d
@@ -388,6 +361,7 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 # Hierarchical sampling (section 5.2)
 def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     # Get pdf
+    print("REALLY WHAT THE FUCK !!!")
     weights = weights + 1e-5 # prevent nans
     pdf = weights / torch.sum(weights, -1, keepdim=True)
     cdf = torch.cumsum(pdf, -1)
@@ -461,7 +435,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, near=0., far=1.0, ndc=Tr
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
-        rays_o, rays_d = rays
+        rays_o, rays_d = rays      # [1, ray_batch_size, 3], [1, ray_batch_size, 3]
 
     if use_viewdirs:
         # provide ray directions as input
@@ -470,32 +444,36 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, near=0., far=1.0, ndc=Tr
             # special case to visualize effect of viewdirs
             rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
         
+        # normalize each direction vector to a unit vector
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
-        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+        viewdirs = torch.reshape(viewdirs, [-1,3]).float()     # [ray_batch_size, 3]
 
-    sh = rays_d.shape # [..., 3]
+    sh = rays_d.shape # [1, ray_batch_size, 3]
     if ndc:
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
-    rays_o = torch.reshape(rays_o, [-1,3]).float()
-    rays_d = torch.reshape(rays_d, [-1,3]).float()
+    rays_o = torch.reshape(rays_o, [-1,3]).float()     # [ray_batch_size, 3]
+    rays_d = torch.reshape(rays_d, [-1,3]).float()     # [ray_batch_size, 3]
 
-    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
-    rays = torch.cat([rays_o, rays_d, near, far], -1)
+    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])  # [ray_batch_size,], [ray_batch_size,]
+    
+    rays = torch.cat([rays_o, rays_d, near, far], -1)    # [ray_batch_size, 3+3+2=8]
     if use_viewdirs:
-        rays = torch.cat([rays, viewdirs], -1)
+        rays = torch.cat([rays, viewdirs], -1)       # [ray_batch_size, 8+3 = 11]
 
     # Render and reshape
     all_ret = batchify_rays(rays, chunk, **kwargs)
-    for k in all_ret:
-        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
-        all_ret[k] = torch.reshape(all_ret[k], k_sh)
+    
+    for key in all_ret:
+        k_sh = list(sh[:-1]) + list(all_ret[key].shape[1:])
+        all_ret[key] = torch.reshape(all_ret[key], k_sh)
 
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
-    ret_list = [all_ret[k] for k in k_extract]
+    ret_list = [all_ret[key] for key in k_extract]
     ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
+    
     return ret_list + [ret_dict]
 
 
@@ -591,7 +569,7 @@ def raw2outputs(nerf_out, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pyt
 
 
 
-def render_rays(ray_batch, network_fn, network_query_fn, num_samples_per_ray, retraw=False, linedisp=False, perturb=0, 
+def render_rays(ray_batch, network_fn, network_query_fn, num_samples_per_ray, retraw=False, lindisp=False, perturb=0, 
                num_fine_samples_per_ray=0, network_fine=None, white_bkgd=False, raw_noise_std=0, verbose=False, pytest=False):
     """
     Volumetric rendering
@@ -622,7 +600,7 @@ def render_rays(ray_batch, network_fn, network_query_fn, num_samples_per_ray, re
     
     t_vals = torch.linspace(0, 1.0, steps=num_samples_per_ray)
     
-    if not linedisp:
+    if not lindisp:
         z_vals = near_dist * (1.0 - t_vals) + far_dist * t_vals
     else:
         z_vals = 1.0 / (1.0/near_dist * (1.0-t_vals) + 1./far_dist * t_vals)

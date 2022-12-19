@@ -10,15 +10,12 @@ import numpy as np
 # from matplotlib.cm import get_cmap
 
 
-base_dir = os.path.join(os.getcwd(), "../")
-# base_dir = os.path.join(os.getcwd(), "drive/MyDrive/CSE291/assignments/assignment3/")
-data_dir = os.path.join(base_dir, "data/bottles/")
-# data_dir = "../data/bottles"
-rgb_dir = os.path.join(data_dir, "rgb")
-pose_dir = os.path.join(data_dir, "pose")
 
-
-def load_data_from_files(store_data=False, resize_factor=1):
+def load_data_from_files(store_data=False, resize_factor=1, base_dir=os.path.join(os.getcwd(), "../")):
+    data_dir = os.path.join(base_dir, "data/bottles/")
+    rgb_dir = os.path.join(data_dir, "rgb")
+    pose_dir = os.path.join(data_dir, "pose")
+    
     train_img_files = []
     train_pose_files = []
     val_img_files = []
@@ -33,7 +30,7 @@ def load_data_from_files(store_data=False, resize_factor=1):
                 train_img_files.append(os.path.join(rgb_dir, filename))
                 train_pose_files.append(os.path.join(pose_dir, filename.split('.')[0] + ".txt"))
             elif filename.split('_')[1] == 'val':
-                if split < 100:
+                if split < 50:
                     train_img_files.append(os.path.join(rgb_dir, filename))
                     train_pose_files.append(os.path.join(pose_dir, filename.split('.')[0] + ".txt"))
                 else: 
@@ -65,9 +62,6 @@ def load_data_from_files(store_data=False, resize_factor=1):
         new_size = (img.size[0] // resize_factor, img.size[1] // resize_factor)
         
         cam_int_mat[0:2] = cam_int_mat[0:2] / resize_factor
-#         cam_int_mat[0:2, 2] = cam_int_mat[0:2, 2] / resize_factor
-#         cam_int_mat[0,0] = cam_int_mat[0,0] / resize_factor
-#         cam_int_mat[1,1] = cam_int_mat[1,1] / resize_factor
 
     for i in tqdm(range(num_train_files)):
         img = Image.open(train_img_files[i])
